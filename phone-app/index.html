@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1412">
+<title>Rangefinder</title>
+<!--
+  Rangefinder phone app (milestone 10). One file, no build step.
+
+  How it works: the iPhone app "Bluefy" is a web browser that can talk
+  Bluetooth (Safari can't). Open this page in Bluefy, tap Connect, pick
+  "Rangefinder", and type the 6-digit code from the device's screen the first
+  time. After that the page:
+    - shows every shot the moment it happens (distance, holds, incline, cant)
+    - sends weather and wind (typed in, or fetched for where you are)
+    - edits the presets and picks the active one
+    - sets MIL/MOA and yards/metres
+  The message formats are in docs/ble-protocol.md.
+
+  SAFETY: this page cannot fire the laser. Only the FIRE button on the device
+  does, and the firmware refuses a RANGE command from the phone.
+
+  Without Bluetooth (a normal browser), "Show demo" fills the page with
+  made-up numbers so you can see the layout. They are marked DEMO.
+-->
+<style>
+:root {
+  --bg: #f1f3f0; --surface: #ffffff; --raised: #e7ebe6; --ink: #121a16; --muted: #5f6d66;
+  --line: #d4dbd5; --accent: #a85f00; --accent-ink: #ffffff; --ok: #1d8a4c; --bad: #c0392b;
+  --num: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif;
+  --text: -apple-system, system-ui, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1412; --surface: #171e1b; --raised: #202925; --ink: #e9f0eb; --muted: #8e9e96;
+    --line: #2b3531; --accent: #f3a53a; --accent-ink: #1b1204; --ok: #58cf8b; --bad: #ff7b6b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1412; --surface: #171e1b; --raised: #202925; --ink: #e9f0eb; --muted: #8e9e96;
+  --line: #2b3531; --accent: #f3a53a; --accent-ink: #1b1204; --ok: #58cf8b; --bad: #ff7b6b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--text); font-size: 16px; }
+body { padding: env(safe-area-inset-top, 0) 16px calc(env(safe-area-inset-bottom, 0) + 88px); -webkit-text-size-adjust: 100%; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 14px 10px; }
+h1 { font-size: 20px; margin: 0; letter-spacing: .01em; }
+.pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 11px; border-radius: 999px;
+        background: var(--raised); font-size: 13px; color: var(--muted); white-space: nowrap; }
+.pill i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.on i { background: var(--ok); }
+.pill.busy i { background: var(--accent); }
+
+.banner { background: var(--raised); border-radius: 12px; padding: 12px 14px; font-size: 14px; color: var(--muted); display: grid; gap: 10px; margin-bottom: 12px; }
+.banner b { color: var(--ink); }
+.big-btn { width: 100%; padding: 15px; border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-ink); font-weight: 650; font-size: 17px; }
+.btn { padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-weight: 560; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:disabled, .big-btn:disabled { opacity: .45; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; }
+.row > * { flex: 1 1 0; }
+
+nav { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(4, 1fr);
+      background: var(--surface); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom, 0); z-index: 5; }
+nav button { border: 0; background: none; padding: 12px 4px 13px; font-size: 13px; color: var(--muted); font-weight: 560; }
+nav button[aria-selected="true"] { color: var(--accent); }
+nav button svg { display: block; margin: 0 auto 3px; width: 22px; height: 22px; }
+
+section[hidden] { display: none !important; }
+section { display: grid; gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: grid; gap: 12px; }
+.label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.demo-tag { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: var(--accent-ink); background: var(--accent); border-radius: 5px; padding: 2px 6px; }
+
+/* ---- Shot ---- */
+.dist { display: flex; align-items: baseline; gap: 8px; }
+.dist .n { font-family: var(--num); font-size: 76px; font-weight: 700; line-height: .95; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.dist .u { font-size: 22px; color: var(--muted); font-weight: 600; }
+.holds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.hold { background: var(--raised); border-radius: 12px; padding: 12px 14px; }
+.hold .v { font-family: var(--num); font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.05; }
+.hold .v small { font-size: 18px; color: var(--muted); margin-right: 4px; font-weight: 700; }
+.hold .alt { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 14px; margin: 0; }
+.facts div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding-bottom: 6px; font-size: 15px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 560; }
+.err { color: var(--bad); font-weight: 600; }
+.stamp { font-size: 13px; color: var(--muted); }
+
+/* ---- forms ---- */
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.field { display: grid; gap: 5px; }
+.field span { font-size: 13px; color: var(--muted); }
+.field input, .field select { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+                              font-variant-numeric: tabular-nums; font-size: 17px; min-width: 0; }
+.field.wide { grid-column: 1 / -1; }
+.hint { font-size: 13px; color: var(--muted); margin: 0; }
+.msg { font-size: 14px; min-height: 1.2em; margin: 0; }
+.msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+
+.clock { position: relative; width: min(300px, 100%); aspect-ratio: 1; margin: 4px auto; }
+.clock svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.clock button { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;
+                border: 1px solid var(--line); background: var(--surface); font-weight: 650; font-variant-numeric: tabular-nums; }
+.clock button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.clock-read { text-align: center; font-size: 15px; }
+
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--raised); border-radius: 10px; padding: 3px; }
+.seg button { border: 0; background: none; padding: 9px; border-radius: 8px; font-weight: 600; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.15); }
+
+/* ---- presets ---- */
+.preset { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.preset:last-child { border-bottom: 0; }
+.preset .name { font-weight: 650; font-size: 17px; display: flex; gap: 8px; align-items: center; }
+.preset .spec { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; grid-column: 1; }
+.preset .acts { grid-row: 1 / 3; grid-column: 2; display: flex; gap: 6px; }
+.preset .acts .btn { padding: 8px 11px; font-size: 14px; }
+.active-tag { font-size: 11px; font-weight: 700; color: var(--ok); border: 1px solid var(--ok); border-radius: 5px; padding: 1px 5px; letter-spacing: .06em; }
+dialog { border: 0; border-radius: 18px; padding: 18px; width: min(420px, calc(100% - 24px)); background: var(--surface); color: var(--ink); }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+dialog h2 { margin: 0 0 12px; font-size: 19px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 15px; margin: 0; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Rangefinder</h1>
+  <span class="pill" id="pill"><i></i><span id="pillText">Not connected</span></span>
+</header>
+
+<div class="banner" id="connectBox">
+  <div id="connectText"><b>Connect to the rangefinder.</b> The first time, the device shows a 6-digit code: type it into the box the iPhone pops up.</div>
+  <button class="big-btn" id="connectBtn">Connect</button>
+  <button class="btn" id="demoBtn" hidden>Show demo</button>
+</div>
+
+<!-- ================= Shot ================= -->
+<section id="tab-shot">
+  <div class="card" id="shotCard">
+    <div class="row" style="align-items:center"><span class="label">Last shot</span><span id="shotDemo" hidden style="flex:0"><span class="demo-tag">DEMO</span></span></div>
+    <div class="dist"><span class="n" id="dist">---</span><span class="u" id="distUnit">yd</span></div>
+    <div class="holds">
+      <div class="hold"><div class="label">Elevation</div><div class="v" id="elev">--</div><div class="alt" id="elevAlt">&nbsp;</div></div>
+      <div class="hold"><div class="label">Wind</div><div class="v" id="wind">--</div><div class="alt" id="windAlt">&nbsp;</div></div>
+    </div>
+    <dl class="facts">
+      <div><dt>Incline</dt><dd id="inc">--</dd></div>
+      <div><dt>Cant</dt><dd id="cant">--</dd></div>
+      <div><dt>Flight</dt><dd id="tof">--</dd></div>
+      <div><dt>Arrives</dt><dd id="fps">--</dd></div>
+    </dl>
+    <div class="stamp" id="shotInfo">Press FIRE on the rangefinder. Shots appear here.</div>
+  </div>
+  <p class="hint">The laser only fires from the FIRE button on the device. This page can't fire it.</p>
+</section>
+
+<!-- ================= Weather ================= -->
+<section id="tab-weather" hidden>
+  <div class="card">
+    <span class="label">Wind</span>
+    <div class="fields">
+      <label class="field"><span>Speed (mph)</span><input id="ws" type="number" inputmode="decimal" min="0" max="60" step="1"></label>
+      <label class="field"><span>From (o'clock)</span><input id="wdShow" type="text" readonly tabindex="-1"></label>
+    </div>
+    <p class="hint">Tap where the wind comes <b>from</b>. 12 = from the target, 3 = from your right.</p>
+    <div class="clock" id="clock">
+      <svg viewBox="0 0 300 300" aria-hidden="true">
+        <circle cx="150" cy="150" r="120" fill="none" stroke="var(--line)" stroke-width="2"/>
+        <text x="150" y="160" text-anchor="middle" font-size="12" fill="var(--muted)" style="font-family:var(--text)">YOU</text>
+        <text x="150" y="104" text-anchor="middle" font-size="11" fill="var(--muted)" style="font-family:var(--text)">▲ target</text>
+        <g id="arrow"></g>
+      </svg>
+    </div>
+    <div class="clock-read" id="clockRead">No wind direction set</div>
+  </div>
+
+  <div class="card">
+    <span class="label">Air</span>
+    <div class="fields">
+      <label class="field"><span>Temperature (°F)</span><input id="t" type="number" inputmode="decimal" step="1"></label>
+      <label class="field"><span>Humidity (%)</span><input id="rh" type="number" inputmode="decimal" min="0" max="100" step="1"></label>
+      <label class="field"><span>Station pressure (inHg)</span><input id="p" type="number" inputmode="decimal" min="15" max="32.5" step="0.01"></label>
+      <label class="field"><span>…or elevation (ft)</span><input id="elevFt" type="number" inputmode="decimal" step="100"></label>
+    </div>
+    <p class="hint">Station pressure is what a barometer reads where you are (not the sea-level number on the news). Typing an elevation fills in the standard pressure for it.</p>
+  </div>
+
+  <div class="card">
+    <span class="label">Local weather</span>
+    <label class="field"><span>Shooting toward (compass), to turn the forecast wind into a clock direction</span>
+      <select id="bearing">
+        <option value="">Don't know: I'll set the clock myself</option>
+        <option value="0">N</option><option value="45">NE</option><option value="90">E</option><option value="135">SE</option>
+        <option value="180">S</option><option value="225">SW</option><option value="270">W</option><option value="315">NW</option>
+      </select>
+    </label>
+    <button class="btn" id="fetchWx">Fill from local weather</button>
+    <p class="hint">Uses this phone's location to ask open-meteo.com for the current temperature, humidity, pressure and wind. Only the location is sent.</p>
+    <p class="msg" id="fetchMsg"></p>
+  </div>
+
+  <button class="big-btn" id="sendWx">Send to rangefinder</button>
+  <p class="msg" id="wxMsg"></p>
+  <p class="hint" id="wxOnDevice"></p>
+</section>
+
+<!-- ================= Presets ================= -->
+<section id="tab-presets" hidden>
+  <div class="card">
+    <span class="label">Presets on the device</span>
+    <div id="presetList"><p class="hint">Connect to see the presets.</p></div>
+    <button class="btn" id="addPreset" disabled>Add preset</button>
+    <p class="msg" id="presetMsg"></p>
+  </div>
+  <p class="hint">Up to 8 presets. Names up to 11 characters, which is what fits on the device's screen.</p>
+</section>
+
+<!-- ================= Device ================= -->
+<section id="tab-device" hidden>
+  <div class="card">
+    <span class="label">Holds</span>
+    <div class="seg" id="holdSeg"><button data-v="MIL" aria-pressed="false">MIL</button><button data-v="MOA" aria-pressed="false">MOA</button></div>
+    <span class="label">Distance</span>
+    <div class="seg" id="unitSeg"><button data-v="yd" aria-pressed="false">Yards</button><button data-v="m" aria-pressed="false">Metres</button></div>
+    <p class="msg" id="devMsg"></p>
+  </div>
+  <div class="card">
+    <span class="label">Rangefinder</span>
+    <dl class="kv">
+      <dt>Battery</dt><dd id="dBatt">--</dd>
+      <dt>Laser</dt><dd id="dLaser">--</dd>
+      <dt>Preset</dt><dd id="dPreset">--</dd>
+      <dt>Weather from</dt><dd id="dWx">--</dd>
+      <dt>Firmware</dt><dd id="dFw">--</dd>
+      <dt>Last reply</dt><dd id="dReply">--</dd>
+    </dl>
+    <button class="btn" id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+  <p class="hint">To unpair, use the device's menu: Forget phones. Then also forget "Rangefinder" in the iPhone's Bluetooth settings.</p>
+</section>
+
+<dialog id="presetDlg">
+  <form method="dialog" id="presetForm">
+    <h2 id="dlgTitle">Edit preset</h2>
+    <div class="fields">
+      <label class="field wide"><span>Name (up to 11 characters)</span><input id="fName" maxlength="11" required></label>
+      <label class="field"><span>BC</span><input id="fBc" type="number" inputmode="decimal" min="0.05" max="1.5" step="0.001" required></label>
+      <label class="field"><span>Drag model</span><select id="fDrag"><option>G1</option><option>G7</option></select></label>
+      <label class="field"><span>Muzzle velocity (fps)</span><input id="fMv" type="number" inputmode="numeric" min="500" max="5000" step="1" required></label>
+      <label class="field"><span>Sight height (in)</span><input id="fSh" type="number" inputmode="decimal" min="0" max="5" step="0.01" required></label>
+      <label class="field"><span>Zero (yd)</span><input id="fZero" type="number" inputmode="numeric" min="10" max="1000" step="1" required></label>
+    </div>
+    <p class="msg" id="dlgMsg"></p>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn" id="dlgDelete" type="button">Delete</button>
+      <button class="btn primary" id="dlgSave" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<nav id="tabs" role="tablist">
+  <button role="tab" data-tab="shot" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>Shot</button>
+  <button role="tab" data-tab="weather" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h11a3 3 0 1 0-3-3M3 12h16a3 3 0 1 1-3 3M3 16h8"/></svg>Weather</button>
+  <button role="tab" data-tab="presets" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Presets</button>
+  <button role="tab" data-tab="device" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h6"/></svg>Device</button>
+</nav>
+
+<script>
+"use strict";
+
+// ================= Bluetooth link =================
+// UUIDs from docs/ble-protocol.md. Only the 4th-8th hex digits change.
+const uuid = n => `be29000${n}-7644-42ae-acf0-8cd6a143cfe2`;
+const SERVICE = uuid(0);
+const CH = { config: uuid(1), environment: uuid(2), command: uuid(3), result: uuid(4), status: uuid(5), setup: uuid(6) };
+
+const enc = new TextEncoder(), dec = new TextDecoder();
+let device = null, chars = {};
+let demo = false;
+
+// Everything we know about the rangefinder, from its messages.
+const state = { status: null, result: null, resultAt: null, setup: null };
+
+// Writes go one at a time. Each one waits for the device's answer, which
+// arrives as a "status" message whose "reply" says "ok: ..." or "error: ...".
+let replyWaiter = null;
+let writeChain = Promise.resolve();
+
+function waitForReply(ms = 4000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { replyWaiter = null; reject(new Error("no answer from the rangefinder")); }, ms);
+    replyWaiter = reply => { clearTimeout(timer); replyWaiter = null; resolve(reply); };
+  });
+}
+
+function send(channel, text) {
+  const job = writeChain.then(async () => {
+    if (demo) return "ok: demo (nothing sent)";
+    if (!chars[channel]) throw new Error("not connected");
+    const answer = waitForReply();
+    const c = chars[channel], data = enc.encode(text);
+    await (c.writeValueWithResponse ? c.writeValueWithResponse(data) : c.writeValue(data));
+    const reply = await answer;
+    if (reply.startsWith("error")) throw new Error(reply.replace(/^error:\s*/, ""));
+    return reply;
+  });
+  writeChain = job.catch(() => {});   // one failed write doesn't block the next
+  return job;
+}
+const sendJson = (channel, obj) => send(channel, JSON.stringify(Object.assign({ v: 1 }, obj)));
+
+async function readJson(channel) {
+  const v = await chars[channel].readValue();
+  return JSON.parse(dec.decode(v));
+}
+
+function onStatus(ev) {
+  const s = JSON.parse(dec.decode(ev.target.value));
+  state.status = s;
+  if (s.reply && replyWaiter) replyWaiter(s.reply);
+  render();
+}
+function onResult(ev) {
+  state.result = JSON.parse(dec.decode(ev.target.value));
+  state.resultAt = new Date();
+  render();
+}
+
+// The first read of a protected characteristic makes iOS ask for the pairing
+// code. While the person types it, reads fail, so keep trying for up to a minute.
+async function readUntilPaired(channel) {
+  const until = Date.now() + 60000;
+  for (;;) {
+    try { return await readJson(channel); }
+    catch (e) {
+      if (Date.now() > until) throw e;
+      setPill("busy", "Type the code from the device");
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { showNoBluetooth(); return; }
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE] }] });
+      device.addEventListener("gattserverdisconnected", onDisconnected);
+    }
+    setPill("busy", "Connecting…");
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+    for (const [name, id] of Object.entries(CH)) {
+      try { chars[name] = await service.getCharacteristic(id); } catch (e) { /* "setup" is missing on firmware before 0.9.5 */ }
+    }
+    state.status = await readUntilPaired("status");
+    state.result = await readJson("result");
+    if (state.result && state.result.ok) state.resultAt = null;   // an older shot, from before we connected
+    await chars.status.startNotifications();
+    chars.status.addEventListener("characteristicvaluechanged", onStatus);
+    await chars.result.startNotifications();
+    chars.result.addEventListener("characteristicvaluechanged", onResult);
+    await refreshSetup();
+    render();
+  } catch (e) {
+    if (e && e.name === "NotFoundError") { setPill("", "Not connected"); return; }   // closed the picker
+    setPill("", "Not connected");
+    flash("connectText", "Couldn't connect: " + (e.message || e) + ". Is the rangefinder on and nearby?", true);
+  }
+}
+
+async function refreshSetup() {
+  if (chars.setup) { try { state.setup = await readJson("setup"); } catch (e) {} }
+}
+
+function onDisconnected() {
+  chars = {};
+  render();
+}
+
+// ================= Screen =================
+const $ = id => document.getElementById(id);
+const fmt = (x, d = 1) => (x == null || isNaN(x)) ? "--" : Number(x).toFixed(d);
+
+function setPill(kind, text) {
+  $("pill").className = "pill " + kind;
+  $("pillText").textContent = text;
+}
+function flash(id, text, bad) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = el.classList.contains("msg") ? "msg " + (bad ? "bad" : "ok") : el.className;
+}
+function connected() { return demo || !!chars.status; }
+
+function render() {
+  const s = state.status, r = state.result;
+  // connection
+  if (demo) setPill("on", "Demo");
+  else if (connected()) setPill("on", s && s.batt >= 0 ? `Connected · ${s.batt}%` : "Connected · USB");
+  else if (device) setPill("", "Disconnected");
+  $("connectBox").hidden = connected();
+  $("connectBtn").textContent = device ? "Reconnect" : "Connect";
+  $("addPreset").disabled = !connected() || !state.setup || state.setup.presets.length >= 8;
+  $("disconnectBtn").disabled = !connected() || demo;
+  $("shotDemo").hidden = !demo;
+
+  // shot
+  const unit = s ? s.unit : "yd", hold = s ? s.hold : "MIL";
+  $("distUnit").textContent = unit;
+  if (r && r.ok) {
+    $("dist").textContent = fmt(unit === "m" ? r.m : r.yd, 0);
+    const other = hold === "MOA" ? "mil" : "moa", main = hold.toLowerCase();
+    const e = r["elev_" + main], w = r["wind_" + main];
+    $("elev").innerHTML = e == null ? "--" : `<small>${e >= 0 ? "U" : "D"}</small>${fmt(Math.abs(e))}`;
+    $("wind").innerHTML = w == null ? "--" : `<small>${w >= 0 ? "R" : "L"}</small>${fmt(Math.abs(w))}`;
+    $("elevAlt").textContent = e == null ? "" : `${hold} · ${fmt(Math.abs(r["elev_" + other]))} ${other.toUpperCase()}`;
+    $("windAlt").textContent = w == null ? "" : `${hold} · ${fmt(Math.abs(r["wind_" + other]))} ${other.toUpperCase()}`;
+    $("inc").textContent = r.inc == null ? "--" : `${r.inc > 0 ? "+" : ""}${fmt(r.inc)}°`;
+    $("cant").textContent = r.cant == null ? "--" : `${fmt(Math.abs(r.cant))}° ${r.cant >= 0 ? "R" : "L"}`;
+    $("tof").textContent = r.tof == null ? "--" : `${fmt(r.tof, 2)} s`;
+    $("fps").textContent = r.fps == null ? "--" : `${Math.round(r.fps)} fps`;
+    $("shotInfo").textContent = `${r.preset || ""}` + (state.resultAt ? ` · ${state.resultAt.toLocaleTimeString()}` : " · from before you connected");
+  } else {
+    $("dist").textContent = "---";
+    for (const id of ["elev", "wind", "inc", "cant", "tof", "fps"]) $(id).textContent = "--";
+    $("elevAlt").innerHTML = $("windAlt").innerHTML = "&nbsp;";
+    $("shotInfo").innerHTML = r && r.err && r.err !== "no shot yet"
+      ? `<span class="err">No reading.</span> ${escapeHtml(r.err)}`
+      : "Press FIRE on the rangefinder. Shots appear here.";
+  }
+
+  // device
+  for (const b of $("holdSeg").children) b.setAttribute("aria-pressed", String(!!s && b.dataset.v === s.hold));
+  for (const b of $("unitSeg").children) b.setAttribute("aria-pressed", String(!!s && b.dataset.v === s.unit));
+  $("dBatt").textContent = !s ? "--" : s.batt < 0 ? "USB power" : `${s.batt}% · ${fmt(s.volts, 2)} V`;
+  $("dLaser").textContent = s ? s.laser : "--";
+  $("dPreset").textContent = s ? `${s.preset + 1}. ${s.name}` : "--";
+  $("dWx").textContent = s ? { phone: "this phone", device: "the device menu", standard: "standard air (none set)" }[s.wx] || s.wx : "--";
+  $("dFw").textContent = s ? s.fw : "--";
+  $("dReply").textContent = s && s.reply ? s.reply : "--";
+
+  renderPresets();
+  renderWxOnDevice();
+}
+
+function escapeHtml(t) { return String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+// ================= Tabs =================
+$("tabs").addEventListener("click", e => {
+  const b = e.target.closest("button[data-tab]");
+  if (!b) return;
+  for (const t of $("tabs").children) t.setAttribute("aria-selected", String(t === b));
+  for (const name of ["shot", "weather", "presets", "device"]) $("tab-" + name).hidden = name !== b.dataset.tab;
+  try { localStorage.setItem("rf-tab", b.dataset.tab); } catch (e) {}
+});
+
+// ================= Weather =================
+// Wind direction on the shooter's clock, as the device wants it: degrees the
+// wind comes FROM, 0 = from the target, 90 = from the right.
+let windFromDeg = null;
+
+function buildClock() {
+  const box = $("clock");
+  for (let h = 1; h <= 12; h++) {
+    const a = (h % 12) * 30 * Math.PI / 180;         // 12 o'clock = straight up
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = h;
+    b.style.left = (50 + 40 * Math.sin(a)) + "%";
+    b.style.top = (50 - 40 * Math.cos(a)) + "%";
+    b.addEventListener("click", () => { setWindDir((h % 12) * 30); saveForm(); });
+    box.appendChild(b);
+  }
+}
+
+function setWindDir(deg) {
+  windFromDeg = deg == null ? null : ((Math.round(deg) % 360) + 360) % 360;
+  const hour = windFromDeg == null ? null : (Math.round(windFromDeg / 30) % 12) || 12;
+  [...$("clock").querySelectorAll("button")].forEach(b => b.setAttribute("aria-pressed", String(+b.textContent === hour)));
+  $("wdShow").value = hour ? `${hour} o'clock` : "";
+  // Arrow from the edge where the wind comes from, pointing in toward you.
+  const g = $("arrow");
+  if (windFromDeg == null) { g.innerHTML = ""; $("clockRead").textContent = "No wind direction set"; return; }
+  const a = windFromDeg * Math.PI / 180, x1 = 150 + 92 * Math.sin(a), y1 = 150 - 92 * Math.cos(a);
+  const x2 = 150 + 30 * Math.sin(a), y2 = 150 - 30 * Math.cos(a);
+  g.innerHTML = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent)" stroke-width="5" stroke-linecap="round"/>` +
+    `<polygon points="${x2},${y2} ${x2 + 14 * Math.sin(a + 0.5)},${y2 - 14 * Math.cos(a + 0.5)} ${x2 + 14 * Math.sin(a - 0.5)},${y2 - 14 * Math.cos(a - 0.5)}" fill="var(--accent)"/>`;
+  const side = windFromDeg === 0 ? "head wind (from the target)" : windFromDeg === 180 ? "tail wind (from behind)"
+             : windFromDeg < 180 ? "from your right, pushes shots left" : "from your left, pushes shots right";
+  $("clockRead").textContent = `From ${hour} o'clock: ${side}`;
+}
+
+// Standard atmosphere: the pressure a barometer reads at an elevation on an
+// average day. Example: 5000 ft -> about 24.9 inHg.
+const pressureForElevation = ft => 29.92 * Math.pow(1 - 6.8756e-6 * ft, 5.2559);
+$("elevFt").addEventListener("input", () => {
+  const ft = parseFloat($("elevFt").value);
+  if (!isNaN(ft)) $("p").value = pressureForElevation(ft).toFixed(2);
+  saveForm();
+});
+
+const WX_FIELDS = ["ws", "t", "rh", "p", "elevFt", "bearing"];
+function saveForm() {
+  try {
+    const f = { wd: windFromDeg };
+    for (const id of WX_FIELDS) f[id] = $(id).value;
+    localStorage.setItem("rf-wx", JSON.stringify(f));
+  } catch (e) {}
+}
+function loadForm() {
+  try {
+    const f = JSON.parse(localStorage.getItem("rf-wx") || "null");
+    if (!f) return;
+    for (const id of WX_FIELDS) if (f[id] != null) $(id).value = f[id];
+    setWindDir(f.wd);
+  } catch (e) {}
+}
+for (const id of WX_FIELDS) $(id).addEventListener("change", saveForm);
+
+$("sendWx").addEventListener("click", async () => {
+  const msg = {};
+  const num = id => { const v = parseFloat($(id).value); return isNaN(v) ? null : v; };
+  if (num("p") != null) msg.p = num("p");
+  if (num("t") != null) msg.t = num("t");
+  if (num("rh") != null) msg.rh = num("rh");
+  if (num("ws") != null) msg.ws = num("ws");
+  if (windFromDeg != null) msg.wd = windFromDeg;
+  if (!Object.keys(msg).length) { flash("wxMsg", "Fill in at least one value first.", true); return; }
+  if (!connected()) { flash("wxMsg", "Connect first.", true); return; }
+  try {
+    await sendJson("environment", msg);
+    await refreshSetup();
+    flash("wxMsg", "Sent. The last shot's holds are updated.");
+    render();
+  } catch (e) { flash("wxMsg", "Not sent: " + e.message, true); }
+});
+
+// Current conditions for where the phone is, from open-meteo.com (free, no account).
+$("fetchWx").addEventListener("click", () => {
+  if (!navigator.geolocation) { flash("fetchMsg", "This browser can't get the location.", true); return; }
+  flash("fetchMsg", "Finding you…");
+  navigator.geolocation.getCurrentPosition(async pos => {
+    try {
+      const { latitude, longitude } = pos.coords;
+      const url = "https://api.open-meteo.com/v1/forecast?latitude=" + latitude.toFixed(3) + "&longitude=" + longitude.toFixed(3) +
+        "&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m" +
+        "&temperature_unit=fahrenheit&wind_speed_unit=mph";
+      const c = (await (await fetch(url)).json()).current;
+      $("t").value = Math.round(c.temperature_2m);
+      $("rh").value = Math.round(c.relative_humidity_2m);
+      $("p").value = (c.surface_pressure * 0.02953).toFixed(2);     // hPa -> inHg, at ground level here
+      $("elevFt").value = "";
+      $("ws").value = Math.round(c.wind_speed_10m);
+      const compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(c.wind_direction_10m / 45) % 8];
+      const bearing = $("bearing").value;
+      let note = `Wind ${Math.round(c.wind_speed_10m)} mph from ${compass}.`;
+      if (bearing !== "") {
+        setWindDir(c.wind_direction_10m - Number(bearing));
+        note += " Clock set from your shooting direction.";
+      } else {
+        note += " Set the clock yourself, or pick your shooting direction above.";
+      }
+      saveForm();
+      flash("fetchMsg", note + " Check it, then Send.");
+    } catch (e) { flash("fetchMsg", "Couldn't get the weather (no signal?). Type the values in instead.", true); }
+  }, () => flash("fetchMsg", "Location not allowed. Type the values in instead.", true), { timeout: 15000, maximumAge: 600000 });
+});
+
+function renderWxOnDevice() {
+  const w = state.setup && state.setup.wx;
+  if (!w) { $("wxOnDevice").textContent = ""; return; }
+  const hour = (Math.round(w.wd / 30) % 12) || 12;
+  const src = { phone: "sent from a phone", device: "set in the device menu", standard: "standard air, nothing set yet" }[w.src] || w.src;
+  $("wxOnDevice").textContent = `On the device now (${src}): ${w.t} °F, ${w.p} inHg (~${w.elev} ft), ${w.rh}% humidity, wind ${w.ws} mph from ${hour} o'clock.`;
+}
+
+// ================= Presets =================
+let editing = -1;   // slot being edited in the dialog; = count for a new one
+
+function renderPresets() {
+  const box = $("presetList");
+  const list = state.setup && state.setup.presets;
+  if (!list) {
+    box.innerHTML = connected() && !chars.setup && !demo
+      ? '<p class="hint">Update the rangefinder firmware to 0.9.5 or later to edit presets here.</p>'
+      : '<p class="hint">Connect to see the presets.</p>';
+    return;
+  }
+  const active = state.status ? state.status.preset : -1;
+  box.innerHTML = list.map((p, i) => `
+    <div class="preset">
+      <div class="name">${escapeHtml(p[0])}${i === active ? '<span class="active-tag">IN USE</span>' : ""}</div>
+      <div class="spec">${p[2]} ${p[1].toFixed(3)} · ${p[3]} fps · ${p[4]}" sight · ${p[5]} yd zero</div>
+      <div class="acts">
+        ${i === active ? "" : `<button class="btn" data-use="${i}">Use</button>`}
+        <button class="btn" data-edit="${i}">Edit</button>
+      </div>
+    </div>`).join("");
+}
+
+$("presetList").addEventListener("click", async e => {
+  const use = e.target.closest("[data-use]"), edit = e.target.closest("[data-edit]");
+  if (use) {
+    try { await send("command", "SELECT_PRESET " + use.dataset.use); flash("presetMsg", "Preset changed."); }
+    catch (err) { flash("presetMsg", err.message, true); }
+    if (demo) { state.status.preset = +use.dataset.use; state.status.name = state.setup.presets[+use.dataset.use][0]; }
+    render();
+  }
+  if (edit) openPreset(+edit.dataset.edit);
+});
+$("addPreset").addEventListener("click", () => openPreset(state.setup.presets.length));
+
+function openPreset(i) {
+  editing = i;
+  const list = state.setup.presets, p = list[i] || ["", 0.3, "G1", 2800, 2.6, 100];
+  $("dlgTitle").textContent = i < list.length ? "Edit preset" : "New preset";
+  [$("fName").value, $("fBc").value, $("fDrag").value, $("fMv").value, $("fSh").value, $("fZero").value] = [p[0], p[1], p[2], p[3], p[4], p[5]];
+  $("dlgDelete").hidden = !(i < list.length && list.length > 1);
+  $("dlgMsg").textContent = "";
+  $("presetDlg").showModal();
+}
+
+const presetObj = (i, p) => ({ i, name: p[0], bc: +p[1], drag: p[2], mv: +p[3], sh: +p[4], zero: +p[5] });
+
+$("presetForm").addEventListener("submit", async e => {
+  if (e.submitter && e.submitter.value === "cancel") return;
+  e.preventDefault();
+  const p = [$("fName").value.trim(), +$("fBc").value, $("fDrag").value, +$("fMv").value, +$("fSh").value, +$("fZero").value];
+  try {
+    await sendJson("config", { preset: presetObj(editing, p) });
+    if (demo) state.setup.presets[editing] = p; else await refreshSetup();
+    $("presetDlg").close();
+    flash("presetMsg", "Saved on the rangefinder.");
+    render();
+  } catch (err) { flash("dlgMsg", err.message, true); }
+});
+
+// Deleting slot i: move every later preset down one slot, then drop the last.
+$("dlgDelete").addEventListener("click", async () => {
+  const list = state.setup.presets.slice();
+  list.splice(editing, 1);
+  try {
+    for (let i = editing; i < list.length; i++) await sendJson("config", { preset: presetObj(i, list[i]) });
+    await sendJson("config", { presetCount: list.length });
+    if (demo) state.setup.presets = list; else await refreshSetup();
+    $("presetDlg").close();
+    flash("presetMsg", "Deleted.");
+    render();
+  } catch (err) { flash("dlgMsg", err.message, true); }
+});
+
+// ================= Device =================
+async function setConfig(obj, key) {
+  try {
+    await sendJson("config", obj);
+    if (demo) Object.assign(state.status, { [key]: obj[key] });
+    flash("devMsg", "Saved on the rangefinder.");
+  } catch (e) { flash("devMsg", e.message, true); }
+  render();
+}
+$("holdSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) setConfig({ hold: b.dataset.v }, "hold"); });
+$("unitSeg").addEventListener("click", e => { const b = e.target.closest("button"); if (b) setConfig({ unit: b.dataset.v }, "unit"); });
+$("disconnectBtn").addEventListener("click", () => { if (device && device.gatt.connected) device.gatt.disconnect(); });
+
+// ================= Start =================
+function showNoBluetooth() {
+  $("connectText").innerHTML = "<b>This browser has no Bluetooth.</b> On the iPhone, open this page in the free <b>Bluefy</b> app (Safari can't connect to devices).";
+  $("connectBtn").hidden = true;
+  $("demoBtn").hidden = false;
+}
+
+// Made-up numbers so the layout can be seen without the device.
+$("demoBtn").addEventListener("click", () => {
+  demo = true;
+  state.status = { v: 1, fw: "0.9.5-m10", batt: 82, volts: 3.98, laser: "off", preset: 0, name: "77g SMK", presets: 2, hold: "MIL", unit: "yd", wx: "phone", reply: "" };
+  state.result = { v: 1, ok: true, yd: 487.3, m: 445.6, inc: 3.2, cant: -0.6, elev_mil: 2.84, wind_mil: -0.41, elev_moa: 9.76, wind_moa: -1.41, tof: 0.61, fps: 2011, preset: "77g SMK" };
+  state.resultAt = new Date();
+  state.setup = { v: 1, presets: [["77g SMK", 0.372, "G1", 2750, 2.6, 100], ["55g 5.56", 0.243, "G1", 3240, 2.6, 100]],
+                  wx: { src: "phone", p: 25.81, t: 64, rh: 30, ws: 8, wd: 270, elev: 4000 } };
+  render();
+});
+
+$("connectBtn").addEventListener("click", connect);
+buildClock();
+loadForm();
+if (!navigator.bluetooth) showNoBluetooth();
+if (location.hash === "#demo") $("demoBtn").click();   // index.html#demo opens straight into the demo
+try {
+  const tab = localStorage.getItem("rf-tab");
+  if (tab) { const b = document.querySelector(`nav button[data-tab="${tab}"]`); if (b) b.click(); }
+} catch (e) {}
+render();
+</script>
+</body>
+</html>

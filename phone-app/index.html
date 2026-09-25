@@ -180,8 +180,8 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
     <div class="clock" id="clock">
       <svg viewBox="0 0 300 300" aria-hidden="true">
         <circle cx="150" cy="150" r="120" fill="none" stroke="var(--line)" stroke-width="2"/>
-        <text x="150" y="160" text-anchor="middle" font-size="12" fill="var(--muted)" style="font-family:var(--text)">YOU</text>
-        <text x="150" y="104" text-anchor="middle" font-size="11" fill="var(--muted)" style="font-family:var(--text)">▲ target</text>
+        <circle cx="150" cy="150" r="14" fill="none" stroke="var(--muted)" stroke-width="2"/>
+        <text x="150" y="175" text-anchor="middle" font-size="11" fill="var(--muted)" style="font-family:var(--text)">YOU</text>
         <g id="arrow"></g>
       </svg>
     </div>
@@ -250,6 +250,14 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
     </dl>
     <button class="btn" id="disconnectBtn" disabled>Disconnect</button>
   </div>
+  <div class="card">
+    <span class="label">This app</span>
+    <dl class="kv">
+      <dt>Version</dt><dd id="appVersion"></dd>
+      <dt>Works offline</dt><dd id="offline">Checking…</dd>
+    </dl>
+    <p class="hint">"Yes" means this page is saved on the phone and opens with no signal. Test it: airplane mode on (Bluetooth can stay on), close Bluefy fully, open it again and load the page.</p>
+  </div>
   <p class="hint">To unpair, use the device's menu: Forget phones. Then also forget "Rangefinder" in the iPhone's Bluetooth settings.</p>
 </section>
 
@@ -264,6 +272,7 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
       <label class="field"><span>Sight height (in)</span><input id="fSh" type="number" inputmode="decimal" min="0" max="5" step="0.01" required></label>
       <label class="field"><span>Zero (yd)</span><input id="fZero" type="number" inputmode="numeric" min="10" max="1000" step="1" required></label>
     </div>
+    <p class="hint" style="margin-top:10px"><b>BC + drag:</b> from the bullet maker's website. Use G7 if they list it (better for long boat-tail bullets). <b>Velocity:</b> a chronograph reading is best. Box numbers come from long test barrels and often run 50–150 fps fast. <b>Sight height:</b> centre of the barrel to centre of the scope, about 2.6" on most ARs.</p>
     <p class="msg" id="dlgMsg"></p>
     <div class="row" style="margin-top:12px">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
@@ -495,12 +504,16 @@ function setWindDir(deg) {
   [...$("clock").querySelectorAll("button")].forEach(b => b.setAttribute("aria-pressed", String(+b.textContent === hour)));
   $("wdShow").value = hour ? `${hour} o'clock` : "";
   // Arrow from the edge where the wind comes from, pointing in toward you.
+  // It's drawn once for wind from 12 o'clock (straight down the middle, from
+  // the top edge toward the centre), then rotated around the centre to the
+  // right hour. Drawing it on the centre line first keeps the shaft and the
+  // head exactly lined up at every angle.
   const g = $("arrow");
   if (windFromDeg == null) { g.innerHTML = ""; $("clockRead").textContent = "No wind direction set"; return; }
-  const a = windFromDeg * Math.PI / 180, x1 = 150 + 92 * Math.sin(a), y1 = 150 - 92 * Math.cos(a);
-  const x2 = 150 + 30 * Math.sin(a), y2 = 150 - 30 * Math.cos(a);
-  g.innerHTML = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent)" stroke-width="5" stroke-linecap="round"/>` +
-    `<polygon points="${x2},${y2} ${x2 + 14 * Math.sin(a + 0.5)},${y2 - 14 * Math.cos(a + 0.5)} ${x2 + 14 * Math.sin(a - 0.5)},${y2 - 14 * Math.cos(a - 0.5)}" fill="var(--accent)"/>`;
+  g.innerHTML = `<g transform="rotate(${windFromDeg} 150 150)">` +
+    `<rect x="143" y="52" width="14" height="50" rx="3" fill="var(--accent)"/>` +      // shaft, 14 wide, centred on x = 150
+    `<polygon points="126,98 174,98 150,134" fill="var(--accent)"/>` +                  // head, 48 wide, tip pointing at you
+    `</g>`;
   const side = windFromDeg === 0 ? "head wind (from the target)" : windFromDeg === 180 ? "tail wind (from behind)"
              : windFromDeg < 180 ? "from your right, pushes shots left" : "from your left, pushes shots right";
   $("clockRead").textContent = `From ${hour} o'clock: ${side}`;
@@ -540,6 +553,13 @@ $("sendWx").addEventListener("click", async () => {
   if (num("t") != null) msg.t = num("t");
   if (num("rh") != null) msg.rh = num("rh");
   if (num("ws") != null) msg.ws = num("ws");
+  // A wind speed means nothing without its direction, and the device would
+  // quietly keep its old direction. So any wind above 0 needs the clock set.
+  if (msg.ws > 0 && windFromDeg == null) {
+    flash("wxMsg", "Tap the clock to set where the wind comes from, then Send.", true);
+    $("clock").scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   if (windFromDeg != null) msg.wd = windFromDeg;
   if (!Object.keys(msg).length) { flash("wxMsg", "Fill in at least one value first.", true); return; }
   if (!connected()) { flash("wxMsg", "Connect first.", true); return; }
@@ -695,6 +715,25 @@ $("demoBtn").addEventListener("click", () => {
                   wx: { src: "phone", p: 25.81, t: 64, rh: 30, ws: 8, wd: 270, elev: 4000 } };
   render();
 });
+
+// ================= Offline =================
+// sw.js keeps a copy of this page on the phone (see the notes in that file).
+// Change APP_VERSION with every upload, so the Device tab shows which copy
+// the phone is running.
+const APP_VERSION = "1.1 (2026-09-25)";
+$("appVersion").textContent = APP_VERSION;
+
+function setOffline(text) { $("offline").textContent = text; }
+if (!("serviceWorker" in navigator)) {
+  setOffline("No: this browser can't save pages");
+} else if (location.protocol !== "https:") {
+  setOffline("No: only works from the https:// address");
+} else {
+  navigator.serviceWorker.register("sw.js")
+    .then(() => navigator.serviceWorker.ready)
+    .then(() => setOffline(navigator.serviceWorker.controller ? "Yes" : "Saved: reload once to finish"))
+    .catch(e => setOffline("No (" + (e.message || e) + ")"));
+}
 
 $("connectBtn").addEventListener("click", connect);
 buildClock();

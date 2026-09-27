@@ -165,7 +165,6 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
     </dl>
     <div class="stamp" id="shotInfo">Press FIRE on the rangefinder. Shots appear here.</div>
   </div>
-  <p class="hint">The laser only fires from the FIRE button on the device. This page can't fire it.</p>
 </section>
 
 <!-- ================= Weather ================= -->
@@ -180,8 +179,6 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
     <div class="clock" id="clock">
       <svg viewBox="0 0 300 300" aria-hidden="true">
         <circle cx="150" cy="150" r="120" fill="none" stroke="var(--line)" stroke-width="2"/>
-        <circle cx="150" cy="150" r="14" fill="none" stroke="var(--muted)" stroke-width="2"/>
-        <text x="150" y="175" text-anchor="middle" font-size="11" fill="var(--muted)" style="font-family:var(--text)">YOU</text>
         <g id="arrow"></g>
       </svg>
     </div>
@@ -226,7 +223,7 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
     <button class="btn" id="addPreset" disabled>Add preset</button>
     <p class="msg" id="presetMsg"></p>
   </div>
-  <p class="hint">Up to 8 presets. Names up to 11 characters, which is what fits on the device's screen.</p>
+  <p class="hint">Up to 6 presets. Names up to 11 characters, which is what fits on the device's screen.</p>
 </section>
 
 <!-- ================= Device ================= -->
@@ -269,10 +266,15 @@ dialog h2 { margin: 0 0 12px; font-size: 19px; }
       <label class="field"><span>BC</span><input id="fBc" type="number" inputmode="decimal" min="0.05" max="1.5" step="0.001" required></label>
       <label class="field"><span>Drag model</span><select id="fDrag"><option>G1</option><option>G7</option></select></label>
       <label class="field"><span>Muzzle velocity (fps)</span><input id="fMv" type="number" inputmode="numeric" min="500" max="5000" step="1" required></label>
-      <label class="field"><span>Sight height (in)</span><input id="fSh" type="number" inputmode="decimal" min="0" max="5" step="0.01" required></label>
+      <label class="field"><span>Sight height (in)</span><input id="fSh" type="number" inputmode="decimal" min="0" max="5" step="0.001" required></label>
       <label class="field"><span>Zero (yd)</span><input id="fZero" type="number" inputmode="numeric" min="10" max="1000" step="1" required></label>
+      <span class="label field wide" style="margin-top:8px">Spin drift (optional)</span>
+      <label class="field"><span>Twist, 1 turn in (in)</span><input id="fTw" type="number" inputmode="decimal" min="0" max="20" step="0.1" placeholder="0 = off"></label>
+      <label class="field"><span>Bullet weight (gr)</span><input id="fWt" type="number" inputmode="numeric" min="10" max="800" step="1"></label>
+      <label class="field"><span>Bullet length (in)</span><input id="fLen" type="number" inputmode="decimal" min="0.2" max="3" step="0.001"></label>
+      <label class="field"><span>Bullet diameter (in)</span><input id="fDia" type="number" inputmode="decimal" min="0.17" max="0.51" step="0.001"></label>
     </div>
-    <p class="hint" style="margin-top:10px"><b>BC + drag:</b> from the bullet maker's website. Use G7 if they list it (better for long boat-tail bullets). <b>Velocity:</b> a chronograph reading is best. Box numbers come from long test barrels and often run 50–150 fps fast. <b>Sight height:</b> centre of the barrel to centre of the scope, about 2.6" on most ARs.</p>
+    <p class="hint" style="margin-top:10px"><b>BC + drag:</b> from the bullet maker's website. Use G7 if they list it (better for long boat-tail bullets). <b>Velocity:</b> a chronograph reading is best. Box numbers come from long test barrels and often run 50–150 fps fast. <b>Sight height:</b> centre of the barrel to centre of the scope, about 2.6" on most ARs. <b>Spin drift:</b> twist 7 for a 1:7 barrel (0 turns it off); the bullet's length is tip to base, measured with calipers.</p>
     <p class="msg" id="dlgMsg"></p>
     <div class="row" style="margin-top:12px">
       <button class="btn" value="cancel" formnovalidate>Cancel</button>
@@ -425,7 +427,7 @@ function render() {
   else if (device) setPill("", "Disconnected");
   $("connectBox").hidden = connected();
   $("connectBtn").textContent = device ? "Reconnect" : "Connect";
-  $("addPreset").disabled = !connected() || !state.setup || state.setup.presets.length >= 8;
+  $("addPreset").disabled = !connected() || !state.setup || state.setup.presets.length >= 6;
   $("disconnectBtn").disabled = !connected() || demo;
   $("shotDemo").hidden = !demo;
 
@@ -503,16 +505,16 @@ function setWindDir(deg) {
   const hour = windFromDeg == null ? null : (Math.round(windFromDeg / 30) % 12) || 12;
   [...$("clock").querySelectorAll("button")].forEach(b => b.setAttribute("aria-pressed", String(+b.textContent === hour)));
   $("wdShow").value = hour ? `${hour} o'clock` : "";
-  // Arrow from the edge where the wind comes from, pointing in toward you.
-  // It's drawn once for wind from 12 o'clock (straight down the middle, from
-  // the top edge toward the centre), then rotated around the centre to the
-  // right hour. Drawing it on the centre line first keeps the shaft and the
-  // head exactly lined up at every angle.
+  // The arrow goes right across the clock, like on the device: its tail at
+  // the hour the wind comes FROM, its head at the hour it blows TOWARD.
+  // It's drawn once for wind from 12 o'clock (straight down the middle, top
+  // to bottom), then rotated around the centre to the right hour. Drawing it
+  // on the centre line first keeps the shaft and the head lined up at every angle.
   const g = $("arrow");
   if (windFromDeg == null) { g.innerHTML = ""; $("clockRead").textContent = "No wind direction set"; return; }
   g.innerHTML = `<g transform="rotate(${windFromDeg} 150 150)">` +
-    `<rect x="143" y="52" width="14" height="50" rx="3" fill="var(--accent)"/>` +      // shaft, 14 wide, centred on x = 150
-    `<polygon points="126,98 174,98 150,134" fill="var(--accent)"/>` +                  // head, 48 wide, tip pointing at you
+    `<rect x="143" y="56" width="14" height="156" rx="3" fill="var(--accent)"/>` +     // shaft, 14 wide, centred on x = 150
+    `<polygon points="126,206 174,206 150,246" fill="var(--accent)"/>` +                // head, 48 wide, at the "toward" side
     `</g>`;
   const side = windFromDeg === 0 ? "head wind (from the target)" : windFromDeg === 180 ? "tail wind (from behind)"
              : windFromDeg < 180 ? "from your right, pushes shots left" : "from your left, pushes shots right";
@@ -626,7 +628,7 @@ function renderPresets() {
   box.innerHTML = list.map((p, i) => `
     <div class="preset">
       <div class="name">${escapeHtml(p[0])}${i === active ? '<span class="active-tag">IN USE</span>' : ""}</div>
-      <div class="spec">${p[2]} ${p[1].toFixed(3)} · ${p[3]} fps · ${p[4]}" sight · ${p[5]} yd zero</div>
+      <div class="spec">${p[2]} ${p[1].toFixed(3)} · ${p[3]} fps · ${p[4]}" sight · ${p[5]} yd zero${p[6] ? ` · 1:${Math.abs(p[6])} twist` : ""}</div>
       <div class="acts">
         ${i === active ? "" : `<button class="btn" data-use="${i}">Use</button>`}
         <button class="btn" data-edit="${i}">Edit</button>
@@ -648,20 +650,34 @@ $("addPreset").addEventListener("click", () => openPreset(state.setup.presets.le
 
 function openPreset(i) {
   editing = i;
-  const list = state.setup.presets, p = list[i] || ["", 0.3, "G1", 2800, 2.6, 100];
+  // A new preset starts from the first one's rifle and bullet size, since
+  // that's usually the same gun.
+  const list = state.setup.presets, first = list[0] || [];
+  const p = list[i] || ["", 0.3, "G1", 2800, first[4] ?? 2.6, 100, first[6] ?? 0, first[7] ?? "", first[8] ?? "", first[9] ?? ""];
   $("dlgTitle").textContent = i < list.length ? "Edit preset" : "New preset";
   [$("fName").value, $("fBc").value, $("fDrag").value, $("fMv").value, $("fSh").value, $("fZero").value] = [p[0], p[1], p[2], p[3], p[4], p[5]];
+  // Spin-drift fields (missing on firmware before 0.9.9, so they show blank).
+  [$("fTw").value, $("fWt").value, $("fLen").value, $("fDia").value] = [p[6] ?? "", p[7] || "", p[8] || "", p[9] || ""];
   $("dlgDelete").hidden = !(i < list.length && list.length > 1);
   $("dlgMsg").textContent = "";
   $("presetDlg").showModal();
 }
 
-const presetObj = (i, p) => ({ i, name: p[0], bc: +p[1], drag: p[2], mv: +p[3], sh: +p[4], zero: +p[5] });
+// One preset as the device wants it. The spin-drift fields are only sent
+// when filled in (older firmware doesn't know them).
+function presetObj(i, p) {
+  const o = { i, name: p[0], bc: +p[1], drag: p[2], mv: +p[3], sh: +p[4], zero: +p[5] };
+  const extra = { tw: p[6], wt: p[7], len: p[8], dia: p[9] };
+  for (const k in extra) if (extra[k] !== "" && extra[k] != null && !isNaN(extra[k])) o[k] = +extra[k];
+  return o;
+}
 
 $("presetForm").addEventListener("submit", async e => {
   if (e.submitter && e.submitter.value === "cancel") return;
   e.preventDefault();
-  const p = [$("fName").value.trim(), +$("fBc").value, $("fDrag").value, +$("fMv").value, +$("fSh").value, +$("fZero").value];
+  const p = [$("fName").value.trim(), +$("fBc").value, $("fDrag").value, +$("fMv").value, +$("fSh").value, +$("fZero").value,
+             $("fTw").value, $("fWt").value, $("fLen").value, $("fDia").value];
+  if (+p[6] > 0 && !(p[7] && p[8] && p[9])) { flash("dlgMsg", "Spin drift also needs the bullet's weight, length and diameter (or set twist to 0).", true); return; }
   try {
     await sendJson("config", { preset: presetObj(editing, p) });
     if (demo) state.setup.presets[editing] = p; else await refreshSetup();
@@ -708,10 +724,10 @@ function showNoBluetooth() {
 // Made-up numbers so the layout can be seen without the device.
 $("demoBtn").addEventListener("click", () => {
   demo = true;
-  state.status = { v: 1, fw: "0.9.5-m10", batt: 82, volts: 3.98, laser: "off", preset: 0, name: "77g SMK", presets: 2, hold: "MIL", unit: "yd", wx: "phone", reply: "" };
-  state.result = { v: 1, ok: true, yd: 487.3, m: 445.6, inc: 3.2, cant: -0.6, elev_mil: 2.84, wind_mil: -0.41, elev_moa: 9.76, wind_moa: -1.41, tof: 0.61, fps: 2011, preset: "77g SMK" };
+  state.status = { v: 1, fw: "0.9.5-m10", batt: 82, volts: 3.98, laser: "off", preset: 0, name: "FR 75 BTHP", presets: 2, hold: "MIL", unit: "yd", wx: "phone", reply: "" };
+  state.result = { v: 1, ok: true, yd: 487.3, m: 445.6, inc: 3.2, cant: -0.6, elev_mil: 2.84, wind_mil: -0.41, elev_moa: 9.76, wind_moa: -1.41, tof: 0.61, fps: 2011, preset: "FR 75 BTHP" };
   state.resultAt = new Date();
-  state.setup = { v: 1, presets: [["77g SMK", 0.372, "G1", 2750, 2.6, 100], ["55g 5.56", 0.243, "G1", 3240, 2.6, 100]],
+  state.setup = { v: 1, presets: [["FR 75 BTHP", 0.355, "G1", 2750, 2.625, 100, 7, 75, 0.99, 0.224], ["55g 5.56", 0.243, "G1", 3240, 2.6, 100, 7, 55, 0.75, 0.224]],
                   wx: { src: "phone", p: 25.81, t: 64, rh: 30, ws: 8, wd: 270, elev: 4000 } };
   render();
 });
@@ -720,7 +736,7 @@ $("demoBtn").addEventListener("click", () => {
 // sw.js keeps a copy of this page on the phone (see the notes in that file).
 // Change APP_VERSION with every upload, so the Device tab shows which copy
 // the phone is running.
-const APP_VERSION = "1.1 (2026-09-25)";
+const APP_VERSION = "1.2 (2026-09-26)";
 $("appVersion").textContent = APP_VERSION;
 
 function setOffline(text) { $("offline").textContent = text; }
